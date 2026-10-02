@@ -50,11 +50,9 @@ struct HK_AirQualitySensor : Service::AirQualitySensor {
 
     void loop() override {
         if (aq->timeVal() > 5000) {
-            // g_hk_tvoc < 0 → no data (sensor absent / warming up) → "Unknown"
-            float tvocPpb = g_hk_tvoc;
-
             // Map TVOC ppb to HomeKit AirQuality index (0-5)
             uint8_t quality = 0; // Unknown
+            float tvocPpb = g_hk_tvoc;
             if (tvocPpb >= 0) {
                 if      (tvocPpb < 65)   quality = 1; // Excellent
                 else if (tvocPpb < 220)  quality = 2; // Good
@@ -65,11 +63,9 @@ struct HK_AirQualitySensor : Service::AirQualitySensor {
             aq->setVal(quality);
 
             // VOCDensity in ug/m3 (rough: ppb * 4 for typical VOC mix)
-            if (tvocPpb >= 0) {
-                float vocUgm3 = tvocPpb * 4.0f;
-                if (vocUgm3 > 1000) vocUgm3 = 1000; // HAP cap
-                voc->setVal(vocUgm3);
-            }
+            float vocUgm3 = tvocPpb * 4.0f;
+            if (vocUgm3 > 1000) vocUgm3 = 1000; // HAP cap
+            voc->setVal(vocUgm3);
         }
     }
 };

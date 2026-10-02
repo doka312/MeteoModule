@@ -3,15 +3,7 @@
  * ────────────────────────────────────
  * Board:     ESP32C3 Dev Module
  * Hardware:  SSD1306 OLED 128×64 (I2C), AHT20+BMP280, Touch GPIO4
- *            Optional: AGS10 TVOC sensor on its OWN I2C bus
- *
- * Wiring
- *   Main I2C bus (hardware, fast):  SDA=GPIO8, SCL=GPIO9
- *     OLED SSD1306 (0x3C), AHT20 (0x38), BMP280 (0x76/0x77)
- *   AGS10 bus (software, ≤15 kHz):  SDA=GPIO5, SCL=GPIO6 (see config)
- *     AGS10 module (0x1A). Power the MODULE (with its regulator)
- *     from 3V3 — then its I2C pull-ups also sit at 3.3 V.
- *     Never power a bare AGS10 chip from 3.3 V: its limit is 3.0 V.
+ *            Optional: AGS10 TVOC sensor (I2C)
  *
  * Libraries (Arduino Library Manager):
  *   U8g2, Adafruit AHTX0, Adafruit BMP280 Library,
@@ -20,96 +12,56 @@
  * Screens:
  *   1 — Temp + Humidity  (widget style)
  *   2 — Pressure + TVOC  (or pressure full-width if AGS10 disabled)
- *       TVOC shows "--" while the sensor warms up, "HIGH" if the
- *       number does not fit into the widget
  *   3 — HomeKit pairing code
  *
  * Button (GPIO4):
- *   1 tap   → cycle screens / dismiss pairing screen / wake display
- *   3 taps  → toggle display on/off
+ *   1 tap       → cycle screens / dismiss pairing screen
+ *   3 taps      → toggle display on/off
+ *   Hold 10 sec → HomeKit factory reset + reboot
  *
  * The display also turns on/off automatically on a network-time
- * schedule (see "Расписание экрана" below). The button overrides
- * the schedule until the next scheduled switch point.
+ * schedule (SCREEN_SCHEDULE_* in the config block). The button
+ * overrides the schedule until the next scheduled switch point.
  *
  * WiFi: configured via Serial (HomeSpan CLI, type 'W')
  * Pairing code: 466-37-726
  */
 
 // ╔══════════════════════════════════════════════════════╗
-// ║     НАСТРОЙКИ — должны стоять ДО #include            ║
+// ║     CONFIGURATION — must be BEFORE #includes         ║
 // ╚══════════════════════════════════════════════════════╝
 
-// ── AGS10 (TVOC) — на отдельной программной шине I2C ──
-#define ENABLE_AGS10        true    // false — датчик не используется
-#define AGS10_PIN_SDA       5       // любые свободные GPIO, кроме 2, 8, 9
-#define AGS10_PIN_SCL       6
-#define AGS10_I2C_FREQ      10000   // Гц; по даташиту не выше 15 кГц
+// Set to true to enable AGS10 TVOC sensor
+#define ENABLE_AGS10        false
 
-// ── Калибровка (прибавляется к показаниям датчика) ──
-#define TEMP_OFFSET         0.0f    // напр. -1.5 — вычесть 1.5 °C
-#define HUMIDITY_OFFSET     +20.0f  // напр. +5.0 — прибавить 5 %
+// Calibration offsets (add to raw reading)
+#define TEMP_OFFSET         0.0f    // e.g. -1.5 to subtract 1.5°C
+#define HUMIDITY_OFFSET     +20.0f    // e.g. +5.0 to add 5%
 
-// ── HomeKit ──
+// HomeKit pairing code (8 digits)
 #define HK_PAIRING_CODE     "46637726"
-#define HK_PAIRING_DISPLAY  "4663-7726"
+#define HK_PAIRING_DISPLAY  "466-37-726"
 
-// ── Основная шина I2C (OLED, AHT20, BMP280) ──
+// I2C pins
 #define PIN_SDA             8
 #define PIN_SCL             9
 
-// ── Расписание экрана (время берётся из интернета по NTP) ──
-// Кнопка работает всегда; ручное вкл/выкл действует до следующего
-// переключения по расписанию.
-// Если время ВЫКЛ раньше времени ВКЛ (напр. ВКЛ 22:00, ВЫКЛ 07:00),
-// окно переходит через полночь — это поддерживается.
-// Одинаковое время ВКЛ и ВЫКЛ — экран включён всегда.
+// ── Display schedule (automatic on/off via network NTP clock) ──
+// The button still works at any time and overrides the schedule
+// until the next scheduled switch point.
+// NTP_SERVER1 may be your router's LAN IP (many routers act as an
+// NTP server, e.g. "192.168.1.1") or a public internet pool.
 #define SCREEN_SCHEDULE_ENABLE   true
-#define SCREEN_ON_HOUR           7      // экран ВКЛ  в 07:00
+#define SCREEN_ON_HOUR           7      // turn display ON  at 07:00
 #define SCREEN_ON_MINUTE         0
-#define SCREEN_OFF_HOUR          23     // экран ВЫКЛ в 23:00
+#define SCREEN_OFF_HOUR          23     // turn display OFF at 23:00
 #define SCREEN_OFF_MINUTE        0
 
-// ── Часовой пояс ──
-// Строка в формате POSIX TZ. Внимание: знак обратный — UTC+3 пишется "-3".
-//   "EET-2"                          Калининград         (UTC+2)
-//   "MSK-3"                          Москва, Петербург   (UTC+3)
-//   "<+04>-4"                        Самара              (UTC+4)
-//   "<+05>-5"                        Екатеринбург        (UTC+5)
-//   "<+06>-6"                        Омск                (UTC+6)
-//   "<+07>-7"                        Новосибирск, Красноярск (UTC+7)
-//   "<+08>-8"                        Иркутск             (UTC+8)
-//   "<+09>-9"                        Якутск              (UTC+9)
-//   "<+10>-10"                       Владивосток         (UTC+10)
-//   "<+11>-11"                       Магадан             (UTC+11)
-//   "<+12>-12"                       Камчатка            (UTC+12)
-//   "EET-2EEST,M3.5.0/3,M10.5.0/4"   Киев, Рига, Хельсинки (с летним временем)
-//   "CET-1CEST,M3.5.0,M10.5.0/3"     Берлин, Варшава, Париж (с летним временем)
-//   "GMT0BST,M3.5.0/1,M10.5.0"       Лондон (с летним временем)
-//   "UTC0"                           UTC
-#define TIMEZONE                 "MSK-3"
-
-// NTP-серверы. Первым можно указать IP роутера (многие роутеры
-// умеют отдавать время, напр. "192.168.1.1").
 #define NTP_SERVER1              "pool.ntp.org"
 #define NTP_SERVER2              "time.nist.gov"
-#define SCHEDULE_CHECK_INTERVAL  15000  // проверка расписания раз в 15 с
-
-// ── Проверка настроек при компиляции ──
-#if SCREEN_ON_HOUR < 0 || SCREEN_ON_HOUR > 23 || SCREEN_OFF_HOUR < 0 || SCREEN_OFF_HOUR > 23
-#error "SCREEN_ON_HOUR / SCREEN_OFF_HOUR must be 0..23"
-#endif
-#if SCREEN_ON_MINUTE < 0 || SCREEN_ON_MINUTE > 59 || SCREEN_OFF_MINUTE < 0 || SCREEN_OFF_MINUTE > 59
-#error "SCREEN_ON_MINUTE / SCREEN_OFF_MINUTE must be 0..59"
-#endif
-#if ENABLE_AGS10 && (AGS10_PIN_SDA == PIN_SDA || AGS10_PIN_SDA == PIN_SCL || \
-                     AGS10_PIN_SCL == PIN_SDA || AGS10_PIN_SCL == PIN_SCL || \
-                     AGS10_PIN_SDA == 4 || AGS10_PIN_SCL == 4)
-#error "AGS10 pins must differ from the main I2C pins and the button pin (GPIO4)"
-#endif
-#if ENABLE_AGS10 && (AGS10_I2C_FREQ > 15000)
-#error "AGS10 supports at most 15 kHz"
-#endif
+#define GMT_OFFSET_SEC           0      // UTC offset, seconds (UTC+3 = 10800)
+#define DAYLIGHT_OFFSET_SEC      0      // extra DST offset, seconds
+#define SCHEDULE_CHECK_INTERVAL  15000  // re-evaluate schedule every 15 s
 
 // ── Includes (AFTER config defines so headers see them) ──
 #include <Wire.h>
@@ -124,7 +76,7 @@
 // ── Global sensor values for HomeKit ──
 float g_hk_temperature = 0;
 float g_hk_humidity    = 0;
-float g_hk_tvoc        = -1;   // -1 = no data → HomeKit "Unknown"
+float g_hk_tvoc        = 0;
 
 // ── Objects ──
 DisplayManager  oled;
@@ -137,12 +89,13 @@ enum AppScreen { SCR_TEMP_HUM, SCR_PRESSURE, SCR_PAIRING };
 AppScreen     currentScreen    = SCR_PAIRING;
 bool          displayOn        = true;
 bool          wifiConnected    = false;
+bool          pairingDismissed = false;
 unsigned long lastSensorRead   = 0;
 const unsigned long SENSOR_INTERVAL = 2000;
 
 // Display schedule state
 unsigned long lastScheduleCheck = 0;
-bool          timeSyncStarted   = false;  // true once NTP was configured
+bool          timeSyncStarted   = false;  // true once NTP configTime() issued
 int8_t        lastSchedState    = -1;     // -1 = unknown, 0 = off, 1 = on
 
 // ──────────────────────────────────────────────
@@ -151,7 +104,7 @@ void setup() {
     delay(300);
     Serial.println("\n=== ESP32-C3 HomeKit Weather Station v2 ===");
 
-    // Main I2C bus
+    // I2C
     Wire.begin(PIN_SDA, PIN_SCL);
     Wire.setClock(100000);
 
@@ -160,16 +113,16 @@ void setup() {
     oled.drawSplash("Weather Station v2");
     delay(800);
 
-    // Sensors (AGS10 gets its own software bus inside SensorManager)
+    // Sensors
     sensors.begin();
-    sensors.update();
+    sensors.update(TEMP_OFFSET, HUMIDITY_OFFSET);
 
     // Touch button
     button.begin();
 
     // ── HomeSpan ──
     homeSpan.setLogLevel(1);
-    homeSpan.setSketchVersion("2.1.0");
+    homeSpan.setSketchVersion("2.0.0");
     homeSpan.setHostNameSuffix("");
     homeSpan.setPairingCode(HK_PAIRING_CODE);
     homeSpan.setQRID("WXST");
@@ -184,7 +137,7 @@ void setup() {
             new Characteristic::Manufacturer("DIY");
             new Characteristic::Model("ESP32C3-WX");
             new Characteristic::SerialNumber("001");
-            new Characteristic::FirmwareRevision("2.1.0");
+            new Characteristic::FirmwareRevision("2.0.0");
 
     // Temperature
     new SpanAccessory();
@@ -215,11 +168,6 @@ void setup() {
 
     Serial.println("[HomeSpan] Ready. Type 'W' in Serial to configure WiFi.");
     Serial.printf("[HomeSpan] Pairing code: %s\n", HK_PAIRING_DISPLAY);
-    #if SCREEN_SCHEDULE_ENABLE
-    Serial.printf("[SCHEDULE] ON %02d:%02d, OFF %02d:%02d, TZ \"%s\"\n",
-                  SCREEN_ON_HOUR, SCREEN_ON_MINUTE,
-                  SCREEN_OFF_HOUR, SCREEN_OFF_MINUTE, TIMEZONE);
-    #endif
 }
 
 // ──────────────────────────────────────────────
@@ -247,20 +195,18 @@ void refreshDisplay() {
             oled.drawPairingScreen(HK_PAIRING_DISPLAY, wifiConnected);
             break;
     }
-
-    oled.turnOn();   // wake the panel after the new frame is in its RAM
 }
 
 // ──────────────────────────────────────────────
 //  Network time & display schedule
 // ──────────────────────────────────────────────
 
-// Configure NTP + time zone once, as soon as WiFi is up.
+// Issue the NTP configuration once, as soon as WiFi is up.
 void initTimeSync() {
     if (timeSyncStarted) return;
-    configTzTime(TIMEZONE, NTP_SERVER1, NTP_SERVER2);
+    configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER1, NTP_SERVER2);
     timeSyncStarted = true;
-    Serial.printf("[TIME] NTP sync requested, TZ \"%s\".\n", TIMEZONE);
+    Serial.println("[TIME] NTP sync requested.");
 }
 
 // True if the display should be ON for the given local time.
@@ -278,7 +224,6 @@ bool scheduleWantsOn(const struct tm &t) {
 // crossed, so a manual button press stays in effect until the
 // next scheduled on/off transition.
 void applySchedule() {
-    if (!timeSyncStarted) return;
     struct tm t;
     if (!getLocalTime(&t, 50)) return;              // time not synced yet
 
@@ -287,8 +232,6 @@ void applySchedule() {
 
     lastSchedState = wantOn;
     displayOn      = wantOn;
-    if (displayOn && currentScreen == SCR_PAIRING && wifiConnected)
-        currentScreen = SCR_TEMP_HUM;               // morning: show the weather
     refreshDisplay();                               // draws screen or turns off
 
     Serial.printf("[SCHEDULE] %02d:%02d -> display %s\n",
@@ -320,12 +263,12 @@ void loop() {
     // Sensor reading
     if (now - lastSensorRead >= SENSOR_INTERVAL) {
         lastSensorRead = now;
-        sensors.update();
+        sensors.update(TEMP_OFFSET, HUMIDITY_OFFSET);
 
         g_hk_temperature = sensors.temperature + TEMP_OFFSET;
         g_hk_humidity    = constrain(sensors.humidity + HUMIDITY_OFFSET, 0, 100);
         #if ENABLE_AGS10
-        g_hk_tvoc        = (float)sensors.tvoc;   // -1 while no data
+        g_hk_tvoc        = sensors.tvoc;
         #endif
 
         // Refresh live data screens
@@ -335,12 +278,15 @@ void loop() {
     }
 
     // Button
-    switch (button.update()) {
+    ButtonEvent evt = button.update();
+
+    switch (evt) {
         case BTN_SINGLE:
             if (!displayOn) {
                 displayOn = true;
                 currentScreen = SCR_TEMP_HUM;
             } else if (currentScreen == SCR_PAIRING) {
+                pairingDismissed = true;
                 currentScreen = SCR_TEMP_HUM;
             } else {
                 currentScreen = (currentScreen == SCR_TEMP_HUM)
@@ -350,9 +296,22 @@ void loop() {
             break;
 
         case BTN_TRIPLE:
-            displayOn = !displayOn;
-            if (displayOn) currentScreen = SCR_TEMP_HUM;
-            refreshDisplay();
+            if (displayOn) {
+                displayOn = false;
+                oled.turnOff();
+            } else {
+                displayOn = true;
+                currentScreen = SCR_TEMP_HUM;
+                refreshDisplay();
+            }
+            break;
+
+        case BTN_LONG_PRESS:
+            Serial.println("[HK] Factory reset triggered!");
+            oled.drawSplash("Factory Reset...");
+            delay(2000);
+            homeSpan.processSerialCommand("F");
+            ESP.restart();
             break;
 
         default:

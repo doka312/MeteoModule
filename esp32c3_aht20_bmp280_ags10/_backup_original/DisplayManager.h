@@ -19,12 +19,6 @@ static const Widget WD_RIGHT = { 67, 3, 58, 58 };
 // Single full-width widget (for pressure-only screen)
 static const Widget WD_FULL  = { 16, 3, 96, 58 };
 
-// Fonts and spacing of the value text inside a widget
-#define WIDGET_VALUE_FONT   u8g2_font_helvB10_te   // the number
-#define WIDGET_UNIT_FONT    u8g2_font_helvR08_te   // "hPa", "ppb" on half-width widgets
-#define WIDGET_UNIT_GAP     2                      // px between number and unit
-#define WIDGET_VALUE_PAD    3                      // min px from text to frame
-
 class DisplayManager {
 public:
     U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2;
@@ -32,29 +26,14 @@ public:
     DisplayManager() : u8g2(U8G2_R0, U8X8_PIN_NONE) {}
 
     void begin() {
-        u8g2.begin();              // also wakes the panel (power save off)
+        u8g2.begin();
         u8g2.setContrast(180);
-        panelOn = true;
     }
 
-    // Put the panel to sleep: SSD1306 "display off" command.
-    // Pixels are dark and the panel draws only a few µA; display RAM
-    // keeps its contents, so turnOn() shows whatever was sent last.
     void turnOff() {
-        if (!panelOn) return;
-        u8g2.setPowerSave(1);
-        panelOn = false;
+        u8g2.clearBuffer();
+        u8g2.sendBuffer();
     }
-
-    // Wake the panel. Call AFTER drawing the new frame so the old
-    // picture never flashes up.
-    void turnOn() {
-        if (panelOn) return;
-        u8g2.setPowerSave(0);
-        panelOn = true;
-    }
-
-    bool isOn() const { return panelOn; }
 
     void drawSplash(const char *text) {
         u8g2.clearBuffer();
@@ -98,26 +77,15 @@ public:
     // ─────────────────────────────────────────
     //  Screen 2b: Pressure + TVOC (two widgets)
     // ─────────────────────────────────────────
-    // Half-width widgets: number in the big font, unit in a small
-    // font next to it, so "1013 hPa" and up to "9999 ppb" fit.
-    // tvocPpb < 0 → no data yet (sensor absent / warming up) → "--"
-    // number too wide for the widget → "HIGH"
-    void drawPressureTvocScreen(float pressureHpa, int32_t tvocPpb) {
+    void drawPressureTvocScreen(float pressureHpa, uint32_t tvocPpb) {
         u8g2.clearBuffer();
 
-        char bufP[12], bufV[12];
-        snprintf(bufP, sizeof(bufP), "%d", (int)round(pressureHpa));
-        drawWidget(WD_LEFT, drawIconPressure, bufP, "hPa");
+        char bufP[16], bufV[16];
+        snprintf(bufP, sizeof(bufP), "%d hPa", (int)round(pressureHpa));
+        snprintf(bufV, sizeof(bufV), "%lu ppb", (unsigned long)tvocPpb);
 
-        if (tvocPpb < 0) {
-            drawWidget(WD_RIGHT, drawIconTVOC, "--");
-        } else {
-            snprintf(bufV, sizeof(bufV), "%ld", (long)tvocPpb);
-            if (valueWidth(bufV, "ppb") <= WD_RIGHT.w - 2 * WIDGET_VALUE_PAD)
-                drawWidget(WD_RIGHT, drawIconTVOC, bufV, "ppb");
-            else
-                drawWidget(WD_RIGHT, drawIconTVOC, "HIGH");
-        }
+        drawWidget(WD_LEFT,  drawIconPressure, bufP);
+        drawWidget(WD_RIGHT, drawIconTVOC,     bufV);
 
         u8g2.sendBuffer();
     }
@@ -152,25 +120,11 @@ public:
     }
 
 private:
-    bool panelOn = true;
-
     // ═══════════════════════════════════════
     //  Generic widget renderer
     // ═══════════════════════════════════════
-    // Width of "value" (big font) + gap + "unit" (small font)
-    int valueWidth(const char *value, const char *unit) {
-        u8g2.setFont(WIDGET_VALUE_FONT);
-        int w = u8g2.getStrWidth(value);
-        if (unit && *unit) {
-            u8g2.setFont(WIDGET_UNIT_FONT);
-            w += WIDGET_UNIT_GAP + u8g2.getStrWidth(unit);
-        }
-        return w;
-    }
-
-    // unit == nullptr → value is drawn alone in the big font
     void drawWidget(const Widget &wd, void (*iconFn)(U8G2_SSD1306_128X64_NONAME_F_HW_I2C&, int, int),
-                    const char *value, const char *unit = nullptr)
+                    const char *value)
     {
         // Rounded frame
         u8g2.drawRFrame(wd.x, wd.y, wd.w, wd.h, 6);
@@ -183,15 +137,12 @@ private:
         // Divider line
         u8g2.drawHLine(wd.x + 4, wd.y + 28, wd.w - 8);
 
-        // Value (+ optional small unit) centered in bottom portion
-        int vx = wd.x + (wd.w - valueWidth(value, unit)) / 2;
+        // Value text centered in bottom portion
+        u8g2.setFont(u8g2_font_helvB10_te);
+        int vw = u8g2.getStrWidth(value);
+        int vx = wd.x + (wd.w - vw) / 2;
         int vy = wd.y + 46;
-        u8g2.setFont(WIDGET_VALUE_FONT);
-        vx += u8g2.drawStr(vx, vy, value);
-        if (unit && *unit) {
-            u8g2.setFont(WIDGET_UNIT_FONT);
-            u8g2.drawStr(vx + WIDGET_UNIT_GAP, vy, unit);
-        }
+        u8g2.drawStr(vx, vy, value);
     }
 
     // ═══════════════════════════════════════

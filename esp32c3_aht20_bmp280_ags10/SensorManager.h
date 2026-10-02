@@ -4,18 +4,34 @@
 #include <Adafruit_AHTX0.h>
 #include <Adafruit_BMP280.h>
 
-// AGS10 I2C address
-#define AGS10_ADDR  0x1A
+// Defaults in case the sketch does not define them
+#ifndef ENABLE_AGS10
+#define ENABLE_AGS10    false
+#endif
+#ifndef AGS10_PIN_SDA
+#define AGS10_PIN_SDA   5
+#endif
+#ifndef AGS10_PIN_SCL
+#define AGS10_PIN_SCL   6
+#endif
+#ifndef AGS10_I2C_FREQ
+#define AGS10_I2C_FREQ  10000
+#endif
+
+#if ENABLE_AGS10
+#include "AGS10.h"
+#endif
 
 class SensorManager {
 public:
     float    temperature = 0.0f;
     float    humidity    = 0.0f;
     float    pressure    = 0.0f;   // hPa
-    uint32_t tvoc        = 0;      // ppb (AGS10)
+    int32_t  tvoc        = -1;     // ppb (AGS10); -1 = no data (absent / warming up / error)
     bool     ahtOk       = false;
     bool     bmpOk       = false;
     bool     agsOk       = false;
+    bool     agsWarming  = false;
 
     bool begin() {
         bool ok = true;
@@ -46,22 +62,22 @@ public:
             Serial.println("[BMP280] OK");
         }
 
-        // AGS10 (optional)
+        // AGS10 (optional, own software I2C bus)
         #if ENABLE_AGS10
-        agsOk = ags10_init();
-        Serial.printf("[AGS10]  %s\n", agsOk ? "OK" : "not found");
+        probeAgs10();
         #endif
 
         return ok;
     }
 
-    void update(float tempOffset, float humOffset) {
+    void update() {
         // AHT20
         if (ahtOk) {
             sensors_event_t humEvent, tempEvent;
-            aht.getEvent(&humEvent, &tempEvent);
-            temperature = tempEvent.temperature;
-            humidity    = humEvent.relative_humidity;
+            if (aht.getEvent(&humEvent, &tempEvent)) {
+                temperature = tempEvent.temperature;
+                humidity    = humEvent.relative_humidity;
+            }
         }
 
         // BMP280
@@ -71,58 +87,68 @@ public:
 
         // AGS10
         #if ENABLE_AGS10
-        if (agsOk) {
-            uint32_t raw;
-            if (ags10_readTVOC(raw)) {
-                tvoc = raw;
-            }
-        }
+        updateAgs10();
         #endif
     }
 
 private:
-    Adafruit_AHTX0  aht;
+    Adafruit_AHTX0   aht;
     Adafruit_BMP280  bmp;
 
-    // ── AGS10 minimal I2C driver ──
-    // Register 0x00: read 5 bytes → [status, tvoc_hi, tvoc_mid, tvoc_lo, crc]
+    #if ENABLE_AGS10
+    AGS10         ags{AGS10_PIN_SDA, AGS10_PIN_SCL, AGS10_I2C_FREQ};
+    unsigned long agsLastProbe = 0;
+    uint8_t       agsErrors    = 0;
 
-    bool ags10_init() {
-        Wire.beginTransmission(AGS10_ADDR);
-        if (Wire.endTransmission() != 0) return false;
-        // Read firmware version as a connectivity check
-        Wire.beginTransmission(AGS10_ADDR);
-        Wire.write(0x11);  // version register
-        if (Wire.endTransmission() != 0) return false;
-        Wire.requestFrom((uint8_t)AGS10_ADDR, (uint8_t)5);
-        if (Wire.available() < 5) return false;
-        // Just drain the bytes — we only need to confirm communication
-        for (int i = 0; i < 5; i++) Wire.read();
-        return true;
+    static constexpr unsigned long AGS_REPROBE_MS  = 30000; // retry if not found
+    static constexpr uint8_t       AGS_MAX_ERRORS  = 5;     // consecutive failures → "lost"
+
+    void probeAgs10() {
+        agsLastProbe = millis();
+        agsOk = ags.begin();
+        agsErrors = 0;
+        if (agsOk) Serial.printf("[AGS10]  OK (fw 0x%02X, SDA=%d SCL=%d)\n",
+                                 ags.version, AGS10_PIN_SDA, AGS10_PIN_SCL);
+        else       Serial.printf("[AGS10]  not found (SDA=%d SCL=%d)\n",
+                                 AGS10_PIN_SDA, AGS10_PIN_SCL);
     }
 
-    bool ags10_readTVOC(uint32_t &ppb) {
-        Wire.beginTransmission(AGS10_ADDR);
-        Wire.write(0x00);
-        if (Wire.endTransmission() != 0) return false;
-
-        Wire.requestFrom((uint8_t)AGS10_ADDR, (uint8_t)5);
-        if (Wire.available() < 5) return false;
-
-        uint8_t status = Wire.read();
-        uint8_t hi     = Wire.read();
-        uint8_t mid    = Wire.read();
-        uint8_t lo     = Wire.read();
-        uint8_t crc    = Wire.read();
-        (void)crc;  // CRC check omitted for simplicity
-
-        // Bit 0 of status: 1 = sensor still warming up
-        if (status & 0x01) {
-            ppb = 0;
-            return true; // valid but warming up
+    void updateAgs10() {
+        if (!agsOk) {
+            tvoc = -1;
+            agsWarming = false;
+            if (millis() - agsLastProbe >= AGS_REPROBE_MS) probeAgs10();
+            return;
         }
 
-        ppb = ((uint32_t)hi << 16) | ((uint32_t)mid << 8) | lo;
-        return true;
+        uint32_t ppb;
+        switch (ags.readTVOC(ppb)) {
+            case AGS10::VALUE:
+                if (agsWarming) Serial.println("[AGS10]  warm-up finished");
+                tvoc = (int32_t)ppb;
+                agsWarming = false;
+                agsErrors = 0;
+                break;
+
+            case AGS10::WARMING:
+                tvoc = -1;
+                agsWarming = true;
+                agsErrors = 0;
+                break;
+
+            case AGS10::FAILED:
+                // Keep the last good value on a single glitch
+                if (++agsErrors >= AGS_MAX_ERRORS) {
+                    Serial.println("[AGS10]  no response, will retry");
+                    agsOk = false;
+                    tvoc = -1;
+                    agsLastProbe = millis();
+                }
+                break;
+
+            case AGS10::TOO_SOON:
+                break;
+        }
     }
+    #endif
 };
